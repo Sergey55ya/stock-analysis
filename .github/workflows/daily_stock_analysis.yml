@@ -1,0 +1,35 @@
+name: Daily Stock Analysis
+
+on:
+  schedule:
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+
+jobs:
+  analyze-stock:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+    
+    - name: Run stock analysis
+      run: |
+        python stock_analysis.py
+    
+    - name: Upload results
+      uses: actions/upload-artifact@v3
+      with:
+        name: stock-analysis-results
+        path: |
+          results_*.csv
+          analysis_*.log
