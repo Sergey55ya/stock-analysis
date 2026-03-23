@@ -56,3 +56,64 @@ jobs:
           cat metadata.json >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
         fi
+
+  # ============================================
+  # ОТПРАВКА EMAIL
+  # ============================================
+  send-email:
+    runs-on: ubuntu-latest
+    needs: analyze-stock
+    if: always() && vars.MAIL_USERNAME != '' && vars.RECIPIENT_EMAILS != ''
+    
+    steps:
+    - name: Download results
+      uses: actions/download-artifact@v4
+      with:
+        name: stock-analysis-results-${{ github.run_id }}
+        path: ./results
+    
+    - name: Find latest result file
+      id: findfile
+      run: |
+        cd ./results
+        RESULT_FILE=$(ls -t results_*.csv 2>/dev/null | head -1)
+        if [ -n "$RESULT_FILE" ]; then
+          echo "result_file=$RESULT_FILE" >> $GITHUB_OUTPUT
+          echo "Found result file: $RESULT_FILE"
+        else
+          echo "result_file=" >> $GITHUB_OUTPUT
+          echo "No result file found"
+        fi
+        
+        if [ -f metadata.json ]; then
+          KITS=$(cat metadata.json | grep -o '"kits_analyzed":[0-9]*' | grep -o '[0-9]*')
+          STOCK=$(cat metadata.json | grep -o '"stock_rows":[0-9]*' | grep -o '[0-9]*')
+          echo "kits_analyzed=$KITS" >> $GITHUB_OUTPUT
+          echo "stock_rows=$STOCK" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Send email via Yandex
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: ${{ vars.MAIL_SERVER }}
+        server_port: ${{ vars.MAIL_PORT }}
+        username: ${{ vars.MAIL_USERNAME }}
+        password: ${{ secrets.MAIL_PASSWORD }}
+        subject: "Stock Analysis Results - ${{ github.run_number }}"
+        to: ${{ vars.RECIPIENT_EMAILS }}
+        from: ${{ vars.MAIL_USERNAME }}
+        body: |
+          Здравствуйте!
+          
+          Анализ складских остатков завершен.
+          
+          📅 Дата: $(date +'%Y-%m-%d %H:%M:%S')
+          📦 Комплектов проанализировано: ${{ steps.findfile.outputs.kits_analyzed }}
+          🏭 Строк в файле склада: ${{ steps.findfile.outputs.stock_rows }}
+          🔢 Номер запуска: ${{ github.run_number }}
+          
+          📎 Результаты прикреплены к письму.
+          
+          --
+          Автоматическая отправка от GitHub Actions
+        attachments: ./results/${{ steps.findfile.outputs.result_file }}
