@@ -2,11 +2,8 @@ name: Daily Stock Analysis
 
 on:
   schedule:
-    # Запуск каждый день в 8:00 MSK (5:00 UTC)
     - cron: '0 5 * * *'
-  workflow_dispatch:  # Возможность ручного запуска
-  push:
-    branches: [ main ]  # Запуск при пуше в main (опционально)
+  workflow_dispatch:
 
 jobs:
   analyze-stock:
@@ -14,15 +11,15 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4  # Обновлено до v4
+      uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v5  # Обновлено до v5
+      uses: actions/setup-python@v5
       with:
         python-version: '3.9'
     
     - name: Cache pip packages
-      uses: actions/cache@v4  # Обновлено до v4
+      uses: actions/cache@v4
       with:
         path: ~/.cache/pip
         key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
@@ -39,14 +36,14 @@ jobs:
         python stock_analysis.py
     
     - name: Upload results as artifact
-      uses: actions/upload-artifact@v4  # Обновлено до v4!
+      uses: actions/upload-artifact@v4
       with:
         name: stock-analysis-results-${{ github.run_id }}
         path: |
           results_*.csv
           analysis_*.log
           metadata.json
-        retention-days: 30  # Хранить артефакты 30 дней
+        retention-days: 30
     
     - name: Create summary
       run: |
@@ -59,26 +56,3 @@ jobs:
           cat metadata.json >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
         fi
-    
-    - name: Send email (optional)
-      if: always() && secrets.MAIL_USERNAME != ''
-      uses: dawidd6/action-send-mail@v3
-      with:
-        server_address: smtp.gmail.com
-        server_port: 465
-        username: ${{ secrets.MAIL_USERNAME }}
-        password: ${{ secrets.MAIL_PASSWORD }}
-        subject: "Stock Analysis Results - ${{ github.run_number }}"
-        to: ${{ secrets.RECIPIENT_EMAIL }}
-        from: GitHub Actions
-        body: |
-          Stock analysis completed.
-          
-          Date: ${{ github.event.schedule }}
-          Status: ${{ job.status }}
-          
-          See attached files for details.
-        attachments: |
-          results_*.csv
-          analysis_*.log
-        secure: true
