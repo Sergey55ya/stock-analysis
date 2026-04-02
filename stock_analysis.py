@@ -8,6 +8,12 @@ import sys
 import logging
 from datetime import datetime
 import json
+import re
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 
 # ============================================
 # 1. НАСТРОЙКИ ЛОГИРОВАНИЯ
@@ -37,7 +43,100 @@ STOCK_FILE_URLS = [
 STOCK_FILENAMES = ["zzap_1.xlsx", "vse_lozhementy.xlsx"]
 
 # ============================================
-# 3. ФУНКЦИИ
+# 3. ФУНКЦИЯ НОРМАЛИЗАЦИИ СТРОК (УЛУЧШЕННАЯ)
+# ============================================
+
+def normalize_string(s):
+    """
+    Полная нормализация строки для поиска:
+    - Удаление пробелов в начале и конце
+    - Приведение к верхнему регистру
+    - Замена русских букв на английские
+    - Удаление всех пробелов
+    - Удаление дефисов, точек, запятых
+    """
+    if not isinstance(s, str):
+        return ""
+    
+    # Приводим к верхнему регистру
+    s = s.upper().strip()
+    
+    # Замена русских букв на английские
+    replacements = {
+        'А': 'A', 'В': 'B', 'Е': 'E', 'Ё': 'E', 'К': 'K', 'М': 'M',
+        'Н': 'H', 'О': 'O', 'Р': 'P', 'С': 'C', 'Т': 'T', 'У': 'Y',
+        'Х': 'X', 'а': 'A', 'в': 'B', 'е': 'E', 'ё': 'E', 'к': 'K',
+        'м': 'M', 'н': 'H', 'о': 'O', 'р': 'P', 'с': 'C', 'т': 'T',
+        'у': 'Y', 'х': 'X'
+    }
+    for rus, eng in replacements.items():
+        s = s.replace(rus, eng)
+    
+    # Удаляем все пробелы
+    s_no_spaces = s.replace(' ', '')
+    
+    # Удаляем дефисы, точки, запятые, слеши
+    s_clean = re.sub(r'[-\.,/]', '', s_no_spaces)
+    
+    return s_clean
+
+# ============================================
+# 4. УЛУЧШЕННАЯ ФУНКЦИЯ ПОИСКА АРТИКУЛОВ
+# ============================================
+
+def find_stock_items(article, df_stock):
+    """
+    Поиск артикулов с улучшенной нормализацией
+    """
+    if df_stock.empty:
+        return pd.DataFrame()
+    
+    original_article = article.strip()
+    normalized_article = normalize_string(original_article)
+    
+    logger.debug(f"      🔍 Поиск: '{original_article}' -> нормализовано: '{normalized_article}'")
+    
+    # 1. Прямой поиск (как есть)
+    result = df_stock[df_stock['Код'] == original_article]
+    if not result.empty:
+        logger.info(f"      ✅ Найден точное совпадение: {original_article}")
+        return result
+    
+    # 2. Поиск без учета регистра
+    result = df_stock[df_stock['Код'].str.upper() == original_article.upper()]
+    if not result.empty:
+        logger.info(f"      ✅ Найден без учета регистра: {original_article}")
+        return result
+    
+    # 3. Поиск по нормализованному значению (без пробелов, без дефисов, с заменой букв)
+    df_stock['Код_норм'] = df_stock['Код'].astype(str).apply(normalize_string)
+    result = df_stock[df_stock['Код_норм'] == normalized_article]
+    if not result.empty:
+        found_code = result.iloc[0]['Код']
+        logger.info(f"      ✅ Найден по нормализации: '{original_article}' -> '{found_code}'")
+        return result
+    
+    # 4. Поиск по частичному совпадению (если нормализованный артикул длинный)
+    if len(normalized_article) > 6:
+        # Ищем, содержится ли наш артикул в артикуле из склада
+        matches = df_stock[df_stock['Код_норм'].str.contains(normalized_article, na=False)]
+        if len(matches) == 1:
+            found_code = matches.iloc[0]['Код']
+            logger.info(f"      ✅ Найден по частичному совпадению: '{original_article}' -> '{found_code}'")
+            return matches
+        
+        # Ищем, содержится ли артикул из склада в нашем
+        matches = df_stock[df_stock['Код_норм'].apply(lambda x: normalized_article in x if isinstance(x, str) else False)]
+        if len(matches) == 1:
+            found_code = matches.iloc[0]['Код']
+            logger.info(f"      ✅ Найден по обратному частичному совпадению: '{original_article}' -> '{found_code}'")
+            return matches
+    
+    logger.warning(f"      ❌ НЕ НАЙДЕН: '{original_article}'")
+    return pd.DataFrame()
+
+# ============================================
+# 5. ОСТАЛЬНЫЕ ФУНКЦИИ (БЕЗ ИЗМЕНЕНИЙ)
 # ============================================
 
 def download_file(url, filename):
@@ -50,10 +149,6 @@ def download_file(url, filename):
         }
         response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
         if response.status_code == 200:
-            content_type = response.headers.get('Content-Type', '')
-            if 'text/html' in content_type and 'google' not in url:
-                logger.warning(f"   ⚠️ Сервер вернул HTML-страницу для {filename}")
-                return False
             with open(filename, 'wb') as f:
                 f.write(response.content)
             logger.info(f"   ✅ Файл успешно скачан: {filename} ({len(response.content)} байт)")
@@ -98,145 +193,100 @@ def load_stock_file(filename):
         return pd.DataFrame()
 
 def clean_kit_name(full_name):
-    """Очищает название комплекта, удаляя всё после последнего слеша"""
+    """Очищает название комплекта"""
     if not isinstance(full_name, str):
         return full_name
     name = full_name.strip()
-    # Удаляем /JTC/ и подобное в конце
     if ' /' in name:
         return name.rsplit(' /', 1)[0].strip()
     if name.endswith('/'):
         return name[:-1].strip()
     return name
 
-def find_stock_items(article, df_stock):
-    """Поиск артикулов с нормализацией"""
-    if df_stock.empty:
-        return pd.DataFrame()
-    
-    article_upper = article.upper().strip()
-    
-    result = df_stock[df_stock['Код'].str.upper() == article_upper]
-    if not result.empty:
-        return result
-
-    normalized = article_upper.replace('-', '')
-    result = df_stock[df_stock['Код'].str.upper() == normalized]
-    if not result.empty:
-        logger.debug(f"      🔍 Найден {article} как {normalized}")
-        return result
-
-    return pd.DataFrame()
-
 def parse_all_kits_from_file(filename):
-    """
-    Парсит файл с комплектами в формате:
-    Строка 1: (пусто) | Комплект | Артикул | Код
-    Строка 2: (пусто) | Название комплекта | Артикул комплекта | ...
-    Строка 3: пустая
-    Строка 4: (пусто) | Наименование | Артикул | Бренд
-    Строка 5+: компоненты
-    """
+    """Парсит файл с комплектами"""
     logger.info(f"📋 Загрузка комплектов из файла {filename}...")
-
+    
     try:
-        # Читаем весь файл без заголовков
         df = pd.read_excel(filename, sheet_name=0, header=None)
         logger.info(f"   Всего строк в файле: {len(df)}")
 
         kits = {}
+        current_kit = None
+        kit_components = []
+        kit_name = ""
+        kit_article = ""
+
         i = 0
-        
         while i < len(df):
             row = df.iloc[i].astype(str).tolist()
             
-            # Ищем строку с "Комплект" в колонке B (индекс 1)
             if len(row) > 1 and row[1] == 'Комплект':
-                # Следующая строка содержит название и артикул комплекта
                 if i + 1 < len(df):
-                    kit_row = df.iloc[i + 1].astype(str).tolist()
-                    
-                    # Название в колонке B (индекс 1), артикул в колонке C (индекс 2)
-                    kit_name = kit_row[1] if len(kit_row) > 1 else ""
-                    kit_article = kit_row[2] if len(kit_row) > 2 else ""
-                    
-                    # Очищаем название от " /JTC/" и подобного
-                    kit_name = clean_kit_name(kit_name)
-                    
-                    logger.info(f"   Найден комплект: {kit_article} - {kit_name}")
-                    
-                    # Ищем компоненты (после строки с "Наименование")
-                    # Строка с "Наименование" обычно на i+3 (через одну пустую)
-                    components = []
-                    
-                    # Находим строку с "Наименование" в колонке B
-                    j = i + 2
-                    while j < len(df):
-                        check_row = df.iloc[j].astype(str).tolist()
-                        if len(check_row) > 1 and check_row[1] == 'Наименование':
-                            j += 1  # Переходим к следующей строке после заголовка
-                            break
-                        j += 1
-                    
-                    # Собираем компоненты
-                    while j < len(df):
-                        comp_row = df.iloc[j].astype(str).tolist()
+                    next_row = df.iloc[i+1].astype(str).tolist()
+                    if len(next_row) > 2:
+                        potential_name = str(next_row[1]).strip()
+                        potential_article = str(next_row[2]).strip()
                         
-                        # Проверяем, не начался ли следующий комплект
-                        if len(comp_row) > 1 and comp_row[1] == 'Комплект':
-                            break
-                        
-                        # Проверяем пустую строку (конец комплекта)
-                        if len(comp_row) > 1 and comp_row[1] in ['', 'nan'] and len(comp_row) > 2 and comp_row[2] in ['', 'nan']:
-                            # Пустая строка — возможно конец комплекта
-                            # Проверим следующую строку
-                            if j + 1 < len(df):
-                                next_row = df.iloc[j + 1].astype(str).tolist()
-                                if len(next_row) > 1 and next_row[1] == 'Комплект':
-                                    break
-                        
-                        # Проверяем, что это валидный артикул компонента
-                        if len(comp_row) > 2 and comp_row[2] and comp_row[2] != 'nan' and comp_row[2] != '':
-                            article = comp_row[2].strip()
+                        if (potential_name and potential_name != 'nan' and
+                            potential_article and potential_article != 'nan' and
+                            len(potential_article) > 3):
                             
-                            # Пропускаем служебные слова
-                            exclude_words = ['гофроящик', 'этикетка', 'ложемент', 'наименование',
-                                           'комплект', 'бренд', 'код', 'упаковка', 'коробка',
-                                           'Наименование', 'Артикул', 'Бренд', 'В комплекте',
-                                           'Остаток', 'Цена']
+                            if current_kit and len(kit_components) > 0:
+                                unique_components = []
+                                seen = set()
+                                for comp in kit_components:
+                                    if comp not in seen and comp not in ['nan', 'Артикул']:
+                                        seen.add(comp)
+                                        unique_components.append(comp)
+                                
+                                if len(unique_components) > 0:
+                                    clean_name = clean_kit_name(kit_name)
+                                    kits[kit_article] = {
+                                        'name': clean_name,
+                                        'components': unique_components
+                                    }
+                                    logger.info(f"      ✅ Загружен комплект {kit_article}: {len(unique_components)} компонентов")
                             
-                            if article not in exclude_words and len(article) > 2 and not article.startswith('УТ'):
-                                components.append(article)
-                        
-                        j += 1
-                    
-                    if components:
-                        # Удаляем дубликаты
-                        unique_components = []
-                        seen = set()
-                        for comp in components:
-                            if comp not in seen:
-                                seen.add(comp)
-                                unique_components.append(comp)
-                        
-                        kits[kit_article] = {
-                            'name': kit_name,
-                            'components': unique_components
-                        }
-                        logger.info(f"      ✅ Загружен комплект {kit_article}: {len(unique_components)} компонентов")
-                    
-                    i = j  # Переходим к следующему комплекту
-                    continue
+                            kit_name = potential_name
+                            kit_article = potential_article
+                            kit_components = []
+                            current_kit = kit_article
+                            i += 2
+                            continue
+            
+            if current_kit and len(row) > 2:
+                article = str(row[2]).strip()
+                if (article and article != 'nan' and article != 'Артикул' and
+                    not article.startswith('УТ') and len(article) > 1 and len(article) < 30):
+                    exclude_words = ['гофроящик', 'этикетка', 'ложемент', 'наименование',
+                                   'комплект', 'бренд', 'код', 'упаковка', 'коробка']
+                    article_lower = article.lower()
+                    if not any(word in article_lower for word in exclude_words):
+                        kit_components.append(article)
             
             i += 1
-        
+
+        if current_kit and len(kit_components) > 0:
+            unique_components = []
+            seen = set()
+            for comp in kit_components:
+                if comp not in seen and comp not in ['nan', 'Артикул']:
+                    seen.add(comp)
+                    unique_components.append(comp)
+            
+            if len(unique_components) > 0:
+                clean_name = clean_kit_name(kit_name)
+                kits[kit_article] = {
+                    'name': clean_name,
+                    'components': unique_components
+                }
+                logger.info(f"      ✅ Загружен комплект {kit_article}: {len(unique_components)} компонентов")
+
         logger.info(f"\n   ✅ Всего загружено комплектов: {len(kits)}")
         return kits
-        
     except Exception as e:
         logger.error(f"   ❌ Ошибка при загрузке файла: {e}")
-        import traceback
-        traceback.print_exc()
         return {}
 
 def calculate_max_quantity_with_groups(components, df_stock, kit_article):
@@ -249,15 +299,6 @@ def calculate_max_quantity_with_groups(components, df_stock, kit_article):
 
     logger.info(f"      Поиск компонентов для {kit_article} (всего {len(components)}):")
     
-    # Показываем первые 5 компонентов для отладки
-    for article in components[:5]:
-        items = find_stock_items(article, df_stock)
-        if not items.empty:
-            logger.info(f"        ✅ {article} -> найден")
-        else:
-            logger.info(f"        ❌ {article} -> НЕ НАЙДЕН")
-    
-    # Полный поиск всех компонентов
     for article in components:
         items = find_stock_items(article, df_stock)
 
@@ -280,13 +321,12 @@ def calculate_max_quantity_with_groups(components, df_stock, kit_article):
         available_items[article] = available.to_dict('records')
 
     if missing_articles:
-        if len(missing_articles) < 5:
+        if len(missing_articles) < 10:
             logger.warning(f"      ⚠️ Отсутствуют: {missing_articles}")
         else:
-            logger.warning(f"      ⚠️ Отсутствуют {len(missing_articles)} компонентов, первые 5: {missing_articles[:5]}")
+            logger.warning(f"      ⚠️ Отсутствуют {len(missing_articles)} компонентов, первые 10: {missing_articles[:10]}")
         return 0, [], missing_articles[0] if missing_articles else None, 0
 
-    # Определяем лимитирующий компонент
     limiting_article = None
     limiting_qty = float('inf')
     
@@ -301,7 +341,6 @@ def calculate_max_quantity_with_groups(components, df_stock, kit_article):
     if max_kits == 0 or max_kits == float('inf'):
         return 0, [], limiting_article, limiting_qty
 
-    # Создаём копии остатков
     stock_copies = {}
     for article, items in available_items.items():
         stock_copies[article] = []
@@ -313,7 +352,6 @@ def calculate_max_quantity_with_groups(components, df_stock, kit_article):
                 'qty': item['Наличие']
             })
 
-    # Формируем комплекты
     kits_assembled = []
     
     for kit_num in range(int(max_kits)):
@@ -342,7 +380,6 @@ def calculate_max_quantity_with_groups(components, df_stock, kit_article):
                 'delivery': kit_delivery
             })
     
-    # Группируем одинаковые комплекты
     grouped = defaultdict(int)
     for kit in kits_assembled:
         key = (kit['price'], kit['delivery'])
@@ -359,7 +396,7 @@ def calculate_max_quantity_with_groups(components, df_stock, kit_article):
     return max_kits, result_groups, limiting_article, limiting_qty
 
 # ============================================
-# 4. ОСНОВНАЯ ФУНКЦИЯ
+# 6. ОСНОВНАЯ ФУНКЦИЯ
 # ============================================
 
 def main():
@@ -411,7 +448,6 @@ def main():
     
     if not kits:
         logger.error("❌ Нет загруженных комплектов для анализа!")
-        logger.info("Проверьте структуру файла vse_lozhementy.xlsx")
         return
     
     # Анализ
@@ -427,7 +463,7 @@ def main():
             kit_info['components'], df_stock, kit_article
         )
         
-        # Заголовок комплекта
+        # Заголовок
         all_results.append({
             'Комплект': kit_info['name'],
             'Артикул': kit_article,
@@ -445,27 +481,7 @@ def main():
             'Срок': ''
         })
         
-        # Срочная поставка (заглушка)
-        all_results.append({
-            'Комплект': kit_info['name'],
-            'Артикул': kit_article,
-            'Бренд': 'PowerMechanics',
-            'Количество': 0,
-            'Цена': '—',
-            'Срок': '—'
-        })
-        
-        # Минимальная цена (заглушка)
-        all_results.append({
-            'Комплект': kit_info['name'],
-            'Артикул': kit_article,
-            'Бренд': 'PowerMechanics',
-            'Количество': 0,
-            'Цена': '—',
-            'Срок': '—'
-        })
-        
-        # Результаты по наличию
+        # Результаты
         if max_qty > 0 and groups:
             for group in groups:
                 all_results.append({
@@ -504,15 +520,7 @@ def main():
                 'Срок': '—'
             })
         
-        # Разделитель между комплектами
-        all_results.append({
-            'Комплект': '',
-            'Артикул': '',
-            'Бренд': '',
-            'Количество': '',
-            'Цена': '',
-            'Срок': ''
-        })
+        all_results.append({'Комплект': '', 'Артикул': '', 'Бренд': '', 'Количество': '', 'Цена': '', 'Срок': ''})
     
     # Сохранение результатов
     output_filename = f'results_{datetime.now().strftime("%Y%m%d")}.csv'
@@ -523,7 +531,7 @@ def main():
     logger.info(f"📊 Проанализировано комплектов: {len(kits)}")
     logger.info("✨ Анализ завершен успешно!")
     
-    # Создаём файл с метаданными
+    # Метаданные
     metadata = {
         'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'kits_analyzed': len(kits),
