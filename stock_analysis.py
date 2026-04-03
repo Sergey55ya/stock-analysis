@@ -9,11 +9,6 @@ import logging
 from datetime import datetime
 import json
 import re
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
 
 # ============================================
 # 1. НАСТРОЙКИ ЛОГИРОВАНИЯ
@@ -43,42 +38,27 @@ STOCK_FILE_URLS = [
 STOCK_FILENAMES = ["zzap_1.xlsx", "vse_lozhementy.xlsx"]
 
 # ============================================
-# 3. ФУНКЦИЯ НОРМАЛИЗАЦИИ СТРОК (УЛУЧШЕННАЯ)
+# 3. ФУНКЦИЯ НОРМАЛИЗАЦИИ
 # ============================================
 
-def normalize_string(s):
+def normalize_article(article):
     """
-    Полная нормализация строки для поиска:
-    - Удаление пробелов в начале и конце
-    - Приведение к верхнему регистру
-    - Замена русских букв на английские
-    - Удаление всех пробелов
-    - Удаление дефисов, точек, запятых
+    Нормализация артикула для поиска:
+    - Удаляет пробелы
+    - Удаляет дефисы
+    - Удаляет всё, кроме букв и цифр
+    - Приводит к верхнему регистру
     """
-    if not isinstance(s, str):
-        return ""
+    if not isinstance(article, str):
+        article = str(article)
     
+    # Удаляем пробелы и дефисы
+    result = article.replace(' ', '').replace('-', '')
+    # Оставляем только буквы и цифры
+    result = re.sub(r'[^A-Za-z0-9]', '', result)
     # Приводим к верхнему регистру
-    s = s.upper().strip()
-    
-    # Замена русских букв на английские
-    replacements = {
-        'А': 'A', 'В': 'B', 'Е': 'E', 'Ё': 'E', 'К': 'K', 'М': 'M',
-        'Н': 'H', 'О': 'O', 'Р': 'P', 'С': 'C', 'Т': 'T', 'У': 'Y',
-        'Х': 'X', 'а': 'A', 'в': 'B', 'е': 'E', 'ё': 'E', 'к': 'K',
-        'м': 'M', 'н': 'H', 'о': 'O', 'р': 'P', 'с': 'C', 'т': 'T',
-        'у': 'Y', 'х': 'X'
-    }
-    for rus, eng in replacements.items():
-        s = s.replace(rus, eng)
-    
-    # Удаляем все пробелы
-    s_no_spaces = s.replace(' ', '')
-    
-    # Удаляем дефисы, точки, запятые, слеши
-    s_clean = re.sub(r'[-\.,/]', '', s_no_spaces)
-    
-    return s_clean
+    result = result.upper()
+    return result
 
 # ============================================
 # 4. УЛУЧШЕННАЯ ФУНКЦИЯ ПОИСКА АРТИКУЛОВ
@@ -86,57 +66,83 @@ def normalize_string(s):
 
 def find_stock_items(article, df_stock):
     """
-    Поиск артикулов с улучшенной нормализацией
+    Поиск артикулов с учётом ведущих нулей и разных форматов
     """
     if df_stock.empty:
         return pd.DataFrame()
     
-    original_article = article.strip()
-    normalized_article = normalize_string(original_article)
+    original_article = str(article).strip()
     
-    logger.debug(f"      🔍 Поиск: '{original_article}' -> нормализовано: '{normalized_article}'")
+    # Создаём список вариантов для поиска
+    variants = [original_article]
     
-    # 1. Прямой поиск (как есть)
-    result = df_stock[df_stock['Код'] == original_article]
-    if not result.empty:
-        logger.info(f"      ✅ Найден точное совпадение: {original_article}")
-        return result
+    # Если артикул состоит только из цифр
+    if original_article.isdigit():
+        # Вариант без ведущих нулей
+        without_zeros = original_article.lstrip('0')
+        if without_zeros and without_zeros != original_article:
+            variants.append(without_zeros)
+        
+        # Вариант с ведущими нулями до 10 символов
+        with_zeros_10 = original_article.zfill(10)
+        if with_zeros_10 != original_article:
+            variants.append(with_zeros_10)
+        
+        # Вариант с ведущими нулями до 8 символов
+        with_zeros_8 = original_article.zfill(8)
+        if with_zeros_8 != original_article and with_zeros_8 != with_zeros_10:
+            variants.append(with_zeros_8)
     
-    # 2. Поиск без учета регистра
-    result = df_stock[df_stock['Код'].str.upper() == original_article.upper()]
-    if not result.empty:
-        logger.info(f"      ✅ Найден без учета регистра: {original_article}")
-        return result
+    # Вариант с удалением пробелов и дефисов
+    no_spaces = original_article.replace(' ', '').replace('-', '')
+    if no_spaces != original_article:
+        variants.append(no_spaces)
     
-    # 3. Поиск по нормализованному значению (без пробелов, без дефисов, с заменой букв)
-    df_stock['Код_норм'] = df_stock['Код'].astype(str).apply(normalize_string)
+    # Вариант с нормализацией (только буквы и цифры)
+    normalized = normalize_article(original_article)
+    if normalized != original_article and normalized != no_spaces:
+        variants.append(normalized)
+    
+    # Удаляем дубликаты, сохраняя порядок
+    variants = list(dict.fromkeys(variants))
+    
+    logger.debug(f"      🔍 Поиск '{original_article}'. Варианты: {variants}")
+    
+    # Пробуем каждый вариант
+    for variant in variants:
+        # Точное совпадение
+        result = df_stock[df_stock['Код'].astype(str) == variant]
+        if not result.empty:
+            logger.info(f"      ✅ Найден: '{variant}'")
+            return result
+        
+        # Совпадение без учёта регистра
+        result = df_stock[df_stock['Код'].astype(str).str.upper() == variant.upper()]
+        if not result.empty:
+            logger.info(f"      ✅ Найден (без учёта регистра): '{variant}' -> '{result.iloc[0]['Код']}'")
+            return result
+    
+    # Поиск по нормализованным значениям (только буквы и цифры)
+    df_stock['Код_норм'] = df_stock['Код'].astype(str).apply(normalize_article)
+    normalized_article = normalize_article(original_article)
+    
     result = df_stock[df_stock['Код_норм'] == normalized_article]
     if not result.empty:
-        found_code = result.iloc[0]['Код']
-        logger.info(f"      ✅ Найден по нормализации: '{original_article}' -> '{found_code}'")
+        logger.info(f"      ✅ Найден по нормализации: '{original_article}' -> '{result.iloc[0]['Код']}'")
         return result
     
-    # 4. Поиск по частичному совпадению (если нормализованный артикул длинный)
-    if len(normalized_article) > 6:
-        # Ищем, содержится ли наш артикул в артикуле из склада
+    # Поиск по частичному совпадению (если артикул длинный)
+    if len(normalized_article) >= 8:
         matches = df_stock[df_stock['Код_норм'].str.contains(normalized_article, na=False)]
         if len(matches) == 1:
-            found_code = matches.iloc[0]['Код']
-            logger.info(f"      ✅ Найден по частичному совпадению: '{original_article}' -> '{found_code}'")
-            return matches
-        
-        # Ищем, содержится ли артикул из склада в нашем
-        matches = df_stock[df_stock['Код_норм'].apply(lambda x: normalized_article in x if isinstance(x, str) else False)]
-        if len(matches) == 1:
-            found_code = matches.iloc[0]['Код']
-            logger.info(f"      ✅ Найден по обратному частичному совпадению: '{original_article}' -> '{found_code}'")
+            logger.info(f"      ✅ Найден по частичному совпадению: '{original_article}' -> '{matches.iloc[0]['Код']}'")
             return matches
     
     logger.warning(f"      ❌ НЕ НАЙДЕН: '{original_article}'")
     return pd.DataFrame()
 
 # ============================================
-# 5. ОСТАЛЬНЫЕ ФУНКЦИИ (БЕЗ ИЗМЕНЕНИЙ)
+# 5. ОСТАЛЬНЫЕ ФУНКЦИИ
 # ============================================
 
 def download_file(url, filename):
@@ -163,7 +169,8 @@ def download_file(url, filename):
 def load_stock_file(filename):
     """Загружает один файл склада и возвращает DataFrame"""
     try:
-        df = pd.read_excel(filename, sheet_name=0, header=0)
+        # Принудительно читаем колонку Код как строку
+        df = pd.read_excel(filename, sheet_name=0, header=0, dtype={'Код': str})
         expected_columns = ['Код', 'Бренд', 'Наименование', 'Цена', 'ID_поставщика', 'Наличие', 'Срок']
         
         if len(df.columns) != 7:
@@ -181,12 +188,19 @@ def load_stock_file(filename):
         df = df.dropna(subset=['Код']).copy()
         df['Код'] = df['Код'].astype(str).str.strip()
         
+        # Очистка цены
         df['Цена'] = df['Цена'].astype(str).str.replace(',', '.').str.replace(' ', '')
         df['Цена'] = pd.to_numeric(df['Цена'], errors='coerce')
         df['Наличие'] = pd.to_numeric(df['Наличие'], errors='coerce').fillna(0)
         df['Срок'] = pd.to_numeric(df['Срок'], errors='coerce').fillna(999)
         
         logger.info(f"   ✅ Загружено {len(df)} строк из {filename}")
+        
+        # Отладка: показываем первые 10 артикулов
+        logger.info(f"   🔍 Первые 10 артикулов из {filename}:")
+        for i, code in enumerate(df['Код'].head(10)):
+            logger.info(f"      {i+1}: '{code}'")
+        
         return df
     except Exception as e:
         logger.error(f"   ❌ Ошибка при чтении файла {filename}: {e}")
@@ -204,7 +218,7 @@ def clean_kit_name(full_name):
     return name
 
 def parse_all_kits_from_file(filename):
-    """Парсит файл с комплектами"""
+    """Парсит файл со всеми комплектами"""
     logger.info(f"📋 Загрузка комплектов из файла {filename}...")
     
     try:
@@ -264,6 +278,9 @@ def parse_all_kits_from_file(filename):
                     article_lower = article.lower()
                     if not any(word in article_lower for word in exclude_words):
                         kit_components.append(article)
+                        # Отладка: показываем добавляемые артикулы
+                        if len(kit_components) <= 10:
+                            logger.info(f"         Добавлен артикул: '{article}'")
             
             i += 1
 
@@ -463,7 +480,7 @@ def main():
             kit_info['components'], df_stock, kit_article
         )
         
-        # Заголовок
+        # Заголовок комплекта
         all_results.append({
             'Комплект': kit_info['name'],
             'Артикул': kit_article,
@@ -481,7 +498,27 @@ def main():
             'Срок': ''
         })
         
-        # Результаты
+        # Срочная поставка (заглушка)
+        all_results.append({
+            'Комплект': kit_info['name'],
+            'Артикул': kit_article,
+            'Бренд': 'PowerMechanics',
+            'Количество': 0,
+            'Цена': '—',
+            'Срок': '—'
+        })
+        
+        # Минимальная цена (заглушка)
+        all_results.append({
+            'Комплект': kit_info['name'],
+            'Артикул': kit_article,
+            'Бренд': 'PowerMechanics',
+            'Количество': 0,
+            'Цена': '—',
+            'Срок': '—'
+        })
+        
+        # Результаты по наличию
         if max_qty > 0 and groups:
             for group in groups:
                 all_results.append({
@@ -520,7 +557,15 @@ def main():
                 'Срок': '—'
             })
         
-        all_results.append({'Комплект': '', 'Артикул': '', 'Бренд': '', 'Количество': '', 'Цена': '', 'Срок': ''})
+        # Разделитель между комплектами
+        all_results.append({
+            'Комплект': '',
+            'Артикул': '',
+            'Бренд': '',
+            'Количество': '',
+            'Цена': '',
+            'Срок': ''
+        })
     
     # Сохранение результатов
     output_filename = f'results_{datetime.now().strftime("%Y%m%d")}.csv'
@@ -531,7 +576,7 @@ def main():
     logger.info(f"📊 Проанализировано комплектов: {len(kits)}")
     logger.info("✨ Анализ завершен успешно!")
     
-    # Метаданные
+    # Создаём файл с метаданными
     metadata = {
         'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'kits_analyzed': len(kits),
